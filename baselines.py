@@ -1,193 +1,173 @@
-# baselines.py - Baseline (Normal Profil) Hesaplama
-# Her kullanıcı için bi "normal davranış" profili oluşturuyorz
-# Sonra yeni gelen olayları (eventleri) bu profille karşılaştırcaz.
+# baselines.py - Baseline (Normal Profile) Calculation
+# we create a "normal behavior" profile for each user
+# then we compare new events against this profile
 #
-# Z-skoru hesaplaması da var. (istatistik dersinden hatırladığım kadarıyla: z = (x - mean) / std)
-# umarım doğru çalışıyordur...
+# z-score formula (from statistics class): z = (x - mean) / std
+# hopefully it works correctly...
 
 import math
-from models import Event, Baseline
+from models import Baseline
 import config
 
 
 def calculate_user_baseline(username, events):
     """
-    Tek bir kullanıcının profilini oluşturur.
-    Toplam işlem sayısı, dosya okuma/yazma vb. bulur.
+    creates a single users profile.
+    counts total operations, file reads/writes etc.
     """
 
     baseline = Baseline(username=username)
 
-    # eğer adamın hiç eventi yoksa patlamasın diye direk dönüyoruz
+    # if the user has no events dont crash, just return empty
     if not events:
-        # print("event yok:", username) # TODO: burayı sonra sil
         return baseline
 
     baseline.total_events = len(events)
 
-    # Dosya işlemlerini say
-    okuma_sayisi = 0
-    yazma_sayisi = 0
-    silme_sayisi = 0
+    # count file operations
+    read_count = 0
+    write_count = 0
+    delete_count = 0
 
     for e in events:
         if e.action == "READ":
-            okuma_sayisi += 1
+            read_count += 1
         elif e.action == "WRITE":
-            yazma_sayisi += 1
+            write_count += 1
         elif e.action == "DELETE":
-            silme_sayisi += 1
+            delete_count += 1
 
-    baseline.file_reads = okuma_sayisi
-    baseline.file_writes = yazma_sayisi
-    baseline.file_deletes = silme_sayisi
+    baseline.file_reads = read_count
+    baseline.file_writes = write_count
+    baseline.file_deletes = delete_count
     
-    # toplam dosya operasyonu
-    baseline.total_file_ops = okuma_sayisi + yazma_sayisi + silme_sayisi
+    # total file operations
+    baseline.total_file_ops = read_count + write_count + delete_count
 
-    # Hangi saatlerde aktif onu bul (gececi mi gündüzcü mü anlamak için)
-    saat_dagilimi = {}
-    farkli_gunler = set() # aynı günü 2 kere saymasın diye set kullandım
+    # find which hours they are active
+    hour_distribution = {}
+    different_days = set() # using set so it doesnt count same day twice
 
     for event in events:
-        saat = event.timestamp.hour
-        gun = event.timestamp.date()
+        hour = event.timestamp.hour
+        day = event.timestamp.date()
 
-        # o saatteki işlemi 1 artır
-        if saat in saat_dagilimi:
-            saat_dagilimi[saat] += 1
+        if hour in hour_distribution:
+            hour_distribution[hour] += 1
         else:
-            saat_dagilimi[saat] = 1
+            hour_distribution[hour] = 1
 
-        farkli_gunler.add(gun)
+        different_days.add(day)
 
-        # mesai dışı mı kontrol et
-        if saat < config.WORK_HOURS_START or saat >= config.WORK_HOURS_END:
+        # check if its outside work hours
+        if hour < config.WORK_HOURS_START or hour >= config.WORK_HOURS_END:
             baseline.off_hours_count += 1
 
-        # gece yarısı mı? (kim gece 3'te sisteme girer ki?)
-        if saat >= config.NIGHT_HOURS_START and saat < config.NIGHT_HOURS_END:
+        # midnight activity
+        if hour >= config.NIGHT_HOURS_START and hour < config.NIGHT_HOURS_END:
             baseline.deep_night_count += 1
 
-    baseline.active_hours = saat_dagilimi
-    baseline.active_days = len(farkli_gunler)
+    baseline.active_hours = hour_distribution
+    baseline.active_days = len(different_days)
 
-    # mesai dışı çalışma oranını bul (0'a bölünme hatası almamak için if koydum)
+    # off-hours ratio (added if check to avoid division by zero)
     if baseline.total_events > 0:
         baseline.off_hours_ratio = baseline.off_hours_count / baseline.total_events
 
-    # günlük ortalama olay sayısı
+    # daily average
     if baseline.active_days > 0:
         baseline.events_per_day = baseline.total_events / baseline.active_days
 
-    # saatlik ortalama ve standart sapma hesabı (baya karışık buralar)
-    saat_degerleri = list(saat_dagilimi.values())
-    if len(saat_degerleri) > 0:
-        # ortalama bul
-        toplam = 0
-        for val in saat_degerleri:
-            toplam += val
-        ortalama = toplam / len(saat_degerleri)
-        baseline.events_per_hour_avg = ortalama
+    # hourly average and standard deviation
+    hour_values = list(hour_distribution.values())
+    if len(hour_values) > 0:
+        total = 0
+        for val in hour_values:
+            total += val
+        average = total / len(hour_values)
+        baseline.events_per_hour_avg = average
 
-        # standart sapma (std) bul
-        # n-1'e bölmek gerekiyormuş örneklem olduğu için (hocanın notlarında öyle yazıyordu)
-        if len(saat_degerleri) > 1:
-            fark_kare_toplam = 0
-            for val in saat_degerleri:
-                fark = val - ortalama
-                fark_kare_toplam += (fark * fark)
+        # standard deviation (n-1 because its a sample)
+        if len(hour_values) > 1:
+            diff_squared_sum = 0
+            for val in hour_values:
+                diff = val - average
+                diff_squared_sum += (diff * diff)
             
-            varyans = fark_kare_toplam / (len(saat_degerleri) - 1)
-            baseline.events_per_hour_std = math.sqrt(varyans)
+            variance = diff_squared_sum / (len(hour_values) - 1)
+            baseline.events_per_hour_std = math.sqrt(variance)
 
     return baseline
 
 
 def calculate_group_zscores(baselines):
     """
-    Gruptaki diğer kişilere göre Z-Skoru hesaplar.
-    Z skoru = (kişinin değeri - grubun ortalaması) / grubun standart sapması
+    calculates Z-Score relative to other users.
+    z = (persons value - group average) / group std
     """
 
-    # Eğer sadece 1 kişi varsa karşılaştıramayız
     if len(baselines) < 2:
         return baselines
 
-    # herkesin verilerini bir listede toplayalım
-    hacimler = []
-    dosya_islemleri = []
-    silmeler = []
+    volumes = []
+    file_operations = []
+    deletions = []
 
     for b in baselines:
-        hacimler.append(b.total_events)
-        dosya_islemleri.append(b.total_file_ops)
-        silmeler.append(b.file_deletes)
+        volumes.append(b.total_events)
+        file_operations.append(b.total_file_ops)
+        deletions.append(b.file_deletes)
 
-    # 1. Toplam hacim (volume) için ortalama ve sapma
-    vol_toplam = sum(hacimler)
-    vol_ort = vol_toplam / len(hacimler)
+    # average and std for total volume
+    vol_avg = sum(volumes) / len(volumes)
+    vol_diff = 0
+    for v in volumes:
+        vol_diff += (v - vol_avg) ** 2
+    vol_std = math.sqrt(vol_diff / (len(volumes) - 1))
 
-    vol_fark = 0
-    for v in hacimler:
-        vol_fark += (v - vol_ort) ** 2
-    vol_std = math.sqrt(vol_fark / (len(hacimler) - 1))
+    # average and std for file operations
+    fops_avg = sum(file_operations) / len(file_operations)
+    fops_diff = 0
+    for v in file_operations:
+        fops_diff += (v - fops_avg) ** 2
+    fops_std = math.sqrt(fops_diff / (len(file_operations) - 1))
 
-    # 2. Dosya işlemleri için ortalama ve sapma
-    fops_toplam = sum(dosya_islemleri)
-    fops_ort = fops_toplam / len(dosya_islemleri)
+    # average and std for deletions
+    del_avg = sum(deletions) / len(deletions)
+    del_diff = 0
+    for v in deletions:
+        del_diff += (v - del_avg) ** 2
+    del_std = math.sqrt(del_diff / (len(deletions) - 1))
 
-    fops_fark = 0
-    for v in dosya_islemleri:
-        fops_fark += (v - fops_ort) ** 2
-    fops_std = math.sqrt(fops_fark / (len(dosya_islemleri) - 1))
-
-    # 3. Silme işlemleri için ortalama ve sapma (bunu sabotaj tespiti için eklemiştim)
-    del_toplam = sum(silmeler)
-    del_ort = del_toplam / len(silmeler)
-
-    del_fark = 0
-    for v in silmeler:
-        del_fark += (v - del_ort) ** 2
-    del_std = math.sqrt(del_fark / (len(silmeler) - 1))
-
-    # Herkese z-skorlarını atayalım
+    # assign z-scores
     for baseline in baselines:
-        # std 0 olursa (herkes aynı şeyi yapmışsa) divide by zero hatası verir, o yüzden kontrol koydum
         if vol_std > 0:
-            baseline.volume_zscore = (baseline.total_events - vol_ort) / vol_std
-        
+            baseline.volume_zscore = (baseline.total_events - vol_avg) / vol_std
         if fops_std > 0:
-            baseline.file_ops_zscore = (baseline.total_file_ops - fops_ort) / fops_std
-
+            baseline.file_ops_zscore = (baseline.total_file_ops - fops_avg) / fops_std
         if del_std > 0:
-            baseline.delete_zscore = (baseline.file_deletes - del_ort) / del_std
+            baseline.delete_zscore = (baseline.file_deletes - del_avg) / del_std
 
     return baselines
 
 
 def calculate_all_baselines(user_events_dict):
     """
-    Bütün kullanıcılar için baseline hesaplayan ana fonksiyon.
-    Run dosyasından bu çağırılıyor.
+    main function - calculates baselines for all users.
+    called from run_detection.py
     """
     baselines = []
     
-    # dictionary'de dönüyoruz (items kullanmak lazım unutma!)
     for username, events in user_events_dict.items():
         user_baseline = calculate_user_baseline(username, events)
         baselines.append(user_baseline)
         
-    # en son herkesin birbiriyle kıyaslamasını yapıyoruz
+    # compare everyone against each other
     baselines = calculate_group_zscores(baselines)
     
     return baselines
 
 
 def baseline_summary(baseline):
-    """
-    Ekrana basmak için string döndürür.
-    Terminalde falan log basarken kullanıyorum bunu.
-    """
-    # virgülden sonra 2 basamak göstermek için .2f kullandım (stack overflow'dan buldum)
+    """returns a summary string for printing to terminal"""
     return f"  User: {baseline.username} | Total Events: {baseline.total_events} | File Ops: {baseline.total_file_ops} | Z-Score (Vol): {baseline.volume_zscore:.2f}"
